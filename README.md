@@ -2,19 +2,7 @@
 
 Monitor all running Claude Code sessions in your terminal.
 
-```
-┌─────────────────────── Session Monitor (9 active) ───────────────────────┐
-│                          Claude Code Sessions                            │
-│ ┏━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━┓ │
-│ ┃      PID ┃ Directory                    ┃  Terminal  ┃ Uptime ┃ Status┃ │
-│ ┡━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━┩ │
-│ │    31781 │ ~/git/my-project             │  ttys000   │  5d 3h │  Idle │ │
-│ │    56351 │ ~                            │  ttys005   │ 1h 24m │  Idle │ │
-│ │    61185 │ ~/git/another-project        │  ttys011   │    40m │  Idle │ │
-│ └──────────┴──────────────────────────────┴────────────┴────────┴───────┘ │
-│                    Updated: 18:45:32 | Press Ctrl+C to exit              │
-└──────────────────────────────────────────────────────────────────────────┘
-```
+![demo](demo.gif)
 
 ## Installation
 
