@@ -12,56 +12,48 @@ pip install claude-sessions
 
 ## Usage
 
-### Monitor running sessions (default)
+Just run:
 
 ```bash
 claude-sessions
 ```
 
-Real-time monitoring of all active Claude Code processes. Updates every 3 seconds.
+This opens an **interactive TUI** where you can:
+- Browse all saved sessions with **arrow keys**
+- **Enter** to attach to the selected session
+- **r** to refresh the list
+- **q** or **Esc** to quit
 
-### List saved sessions
+The list auto-refreshes every 3 seconds.
 
-```bash
-claude-sessions list
-```
-
-Shows all saved sessions from `~/.claude/projects/` with:
-- Session ID
-- Working directory
-- Last activity time
-- First message summary
-
-### Attach to a session
+### Commands
 
 ```bash
-# Interactive selection
-claude-sessions attach
+# Interactive session browser (default)
+claude-sessions
 
-# By number (from list)
+# Monitor running processes
+claude-sessions monitor
+
+# Attach directly by number or ID
 claude-sessions attach 1
-
-# By session ID (partial match)
 claude-sessions attach 64b1fd94
 ```
 
-Resumes a previous conversation using `claude --resume`.
-
-## Commands
-
 | Command | Alias | Description |
 |---------|-------|-------------|
-| `monitor` | (default) | Monitor running sessions |
-| `list` | `ls` | List saved sessions |
-| `attach` | `a` | Attach to a saved session |
+| (default) | | Interactive session browser |
+| `monitor` | | Monitor running Claude processes |
+| `list` | `ls` | Same as default |
+| `attach` | `a` | Attach to a session by number/ID |
 
 ## Features
 
-- Real-time monitoring of all Claude Code CLI sessions
-- List and resume saved sessions
-- Interactive session selection
-- Shows PID, working directory, terminal, uptime, and status
-- Clean TUI with [rich](https://github.com/Textualize/rich)
+- Interactive TUI with keyboard navigation
+- Real-time session list refresh
+- Resume sessions with `claude --resume`
+- Shows session ID, directory, last activity, and first message
+- Fallback to simple list if textual is not installed
 
 ## Requirements
 

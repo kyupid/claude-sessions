@@ -4,13 +4,24 @@
 import argparse
 import json
 import os
-import subprocess
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
 
 import psutil
+
+# Check if running in TUI mode
+TUI_MODE = True
+try:
+    from textual.app import App, ComposeResult
+    from textual.widgets import DataTable, Header, Footer, Static
+    from textual.containers import Container
+    from textual.binding import Binding
+    from textual import work
+except ImportError:
+    TUI_MODE = False
+
 from rich.console import Console
 from rich.live import Live
 from rich.table import Table
@@ -97,7 +108,6 @@ def get_claude_sessions() -> list[dict]:
     for proc in psutil.process_iter(['pid', 'cwd', 'terminal', 'create_time', 'status']):
         try:
             cmdline = proc.cmdline()
-            # Claude Code CLI runs as node but cmdline[0] is 'claude'
             if cmdline and cmdline[0] == 'claude':
                 info = proc.info
                 sessions.append({
@@ -110,7 +120,6 @@ def get_claude_sessions() -> list[dict]:
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             continue
 
-    # Sort by PID
     sessions.sort(key=lambda x: x['pid'])
     return sessions
 
@@ -127,18 +136,14 @@ def get_saved_sessions() -> list[dict]:
         if not project_dir.is_dir():
             continue
 
-        # Decode project path from directory name
         project_path = project_dir.name.replace("-", "/")
-        if project_path.startswith("/"):
-            project_path = project_path  # Already absolute
-        else:
+        if not project_path.startswith("/"):
             project_path = "/" + project_path
 
         for session_file in project_dir.glob("*.jsonl"):
             session_id = session_file.stem
 
             try:
-                # Read first and last line to get metadata
                 with open(session_file, 'r') as f:
                     first_line = f.readline().strip()
                     if not first_line:
@@ -146,25 +151,20 @@ def get_saved_sessions() -> list[dict]:
 
                     first_entry = json.loads(first_line)
 
-                    # Get last line for last activity
-                    f.seek(0, 2)  # Go to end
+                    f.seek(0, 2)
                     file_size = f.tell()
-
-                    # Read last few KB to find last line
                     read_size = min(4096, file_size)
                     f.seek(max(0, file_size - read_size))
                     last_lines = f.read().strip().split('\n')
                     last_line = last_lines[-1] if last_lines else first_line
                     last_entry = json.loads(last_line)
 
-                # Extract first user message as summary
                 summary = ""
                 if first_entry.get('type') == 'user':
                     content = first_entry.get('message', {}).get('content', '')
                     if isinstance(content, str):
                         summary = content[:50] + "..." if len(content) > 50 else content
 
-                # Parse timestamps
                 first_ts = datetime.fromisoformat(first_entry['timestamp'].replace('Z', '+00:00'))
                 last_ts = datetime.fromisoformat(last_entry['timestamp'].replace('Z', '+00:00'))
 
@@ -179,27 +179,139 @@ def get_saved_sessions() -> list[dict]:
             except (json.JSONDecodeError, KeyError, ValueError):
                 continue
 
-    # Sort by last activity (most recent first)
     sessions.sort(key=lambda x: x['last_activity'], reverse=True)
     return sessions
 
 
-def is_session_running(session_id: str) -> bool:
-    """Check if a session is currently running."""
-    for proc in psutil.process_iter(['cmdline']):
-        try:
-            cmdline = proc.cmdline()
-            if cmdline and 'claude' in cmdline[0]:
-                # Check if --resume with this session ID
-                if '--resume' in cmdline or '-r' in cmdline:
-                    for i, arg in enumerate(cmdline):
-                        if arg in ('--resume', '-r') and i + 1 < len(cmdline):
-                            if cmdline[i + 1] == session_id:
-                                return True
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            continue
-    return False
+def attach_to_session(session: dict):
+    """Attach to a session using claude --resume."""
+    session_id = session['session_id']
+    cwd = session['cwd']
 
+    try:
+        os.chdir(cwd)
+    except (FileNotFoundError, PermissionError):
+        pass
+
+    os.execlp("claude", "claude", "--resume", session_id)
+
+
+# ============ Textual TUI App ============
+
+if TUI_MODE:
+    class SessionsApp(App):
+        """Interactive TUI for Claude Code sessions."""
+
+        CSS = """
+        Screen {
+            background: $surface;
+        }
+
+        #title {
+            dock: top;
+            height: 3;
+            content-align: center middle;
+            background: $primary;
+            color: $text;
+            text-style: bold;
+        }
+
+        #status {
+            dock: bottom;
+            height: 1;
+            background: $primary-darken-2;
+            color: $text-muted;
+            padding: 0 1;
+        }
+
+        DataTable {
+            height: 1fr;
+        }
+
+        DataTable > .datatable--cursor {
+            background: $accent;
+            color: $text;
+        }
+        """
+
+        BINDINGS = [
+            Binding("q", "quit", "Quit"),
+            Binding("enter", "select", "Attach"),
+            Binding("r", "refresh", "Refresh"),
+            Binding("escape", "quit", "Quit"),
+        ]
+
+        def __init__(self):
+            super().__init__()
+            self.sessions = []
+            self.selected_session = None
+
+        def compose(self) -> ComposeResult:
+            yield Static("Claude Code Sessions", id="title")
+            yield DataTable(id="sessions-table")
+            yield Static("↑↓ Navigate | Enter: Attach | r: Refresh | q: Quit", id="status")
+
+        def on_mount(self) -> None:
+            table = self.query_one("#sessions-table", DataTable)
+            table.cursor_type = "row"
+            table.add_columns("#", "Session ID", "Directory", "Last Active", "Summary")
+            self.refresh_sessions()
+            self.set_interval(3, self.refresh_sessions)
+
+        def refresh_sessions(self) -> None:
+            self.sessions = get_saved_sessions()
+            table = self.query_one("#sessions-table", DataTable)
+
+            # Remember cursor position
+            cursor_row = table.cursor_row if table.row_count > 0 else 0
+
+            table.clear()
+
+            for i, session in enumerate(self.sessions[:50], 1):
+                table.add_row(
+                    str(i),
+                    session['session_id'][:8] + "...",
+                    shorten_path(session['cwd'], 35),
+                    format_time_ago(session['last_activity']),
+                    (session['summary'] or "-")[:40],
+                    key=session['session_id'],
+                )
+
+            # Restore cursor position
+            if table.row_count > 0:
+                table.move_cursor(row=min(cursor_row, table.row_count - 1))
+
+            # Update status
+            status = self.query_one("#status", Static)
+            status.update(f"↑↓ Navigate | Enter: Attach | r: Refresh | q: Quit | {len(self.sessions)} sessions | Updated: {datetime.now().strftime('%H:%M:%S')}")
+
+        def action_refresh(self) -> None:
+            self.refresh_sessions()
+
+        def action_select(self) -> None:
+            table = self.query_one("#sessions-table", DataTable)
+            if table.row_count == 0:
+                return
+
+            row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
+            session_id = str(row_key.value)
+
+            for session in self.sessions:
+                if session['session_id'] == session_id:
+                    self.selected_session = session
+                    self.exit()
+                    break
+
+        def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+            session_id = str(event.row_key.value)
+            for session in self.sessions:
+                if session['session_id'] == session_id:
+                    self.selected_session = session
+                    self.exit()
+                    break
+
+
+# ============ Rich-based fallback ============
 
 def create_table(sessions: list[dict]) -> Table:
     """Create a rich Table displaying session information."""
@@ -274,6 +386,8 @@ def create_display(sessions: list[dict]) -> Panel:
     )
 
 
+# ============ Commands ============
+
 def cmd_monitor(args):
     """Monitor running Claude Code sessions."""
     console = Console()
@@ -293,25 +407,32 @@ def cmd_monitor(args):
 
 
 def cmd_list(args):
-    """List all saved sessions."""
-    console = Console()
-    sessions = get_saved_sessions()
+    """List all saved sessions with interactive selection."""
+    if TUI_MODE:
+        app = SessionsApp()
+        app.run()
 
-    if not sessions:
-        console.print("[yellow]No saved sessions found.[/yellow]")
-        return
+        if app.selected_session:
+            attach_to_session(app.selected_session)
+    else:
+        # Fallback to simple list
+        console = Console()
+        sessions = get_saved_sessions()
 
-    # Limit display
-    limit = args.limit if hasattr(args, 'limit') and args.limit else 20
-    display_sessions = sessions[:limit]
+        if not sessions:
+            console.print("[yellow]No saved sessions found.[/yellow]")
+            return
 
-    table = create_saved_sessions_table(display_sessions)
-    console.print(table)
+        limit = args.limit if hasattr(args, 'limit') and args.limit else 20
+        display_sessions = sessions[:limit]
 
-    if len(sessions) > limit:
-        console.print(f"[dim]... and {len(sessions) - limit} more sessions[/dim]")
+        table = create_saved_sessions_table(display_sessions)
+        console.print(table)
 
-    console.print(f"\n[dim]Use 'claude-sessions attach <number>' to resume a session[/dim]")
+        if len(sessions) > limit:
+            console.print(f"[dim]... and {len(sessions) - limit} more sessions[/dim]")
+
+        console.print(f"\n[dim]Use 'claude-sessions attach <number>' to resume a session[/dim]")
 
 
 def cmd_attach(args):
@@ -323,11 +444,9 @@ def cmd_attach(args):
         console.print("[yellow]No saved sessions found.[/yellow]")
         return
 
-    # If session ID/number provided
     if args.session:
         session_id = args.session
 
-        # Check if it's a number (index)
         if session_id.isdigit():
             idx = int(session_id) - 1
             if 0 <= idx < len(sessions):
@@ -336,7 +455,6 @@ def cmd_attach(args):
                 console.print(f"[red]Invalid session number. Use 1-{len(sessions)}[/red]")
                 return
 
-        # Find session by ID (partial match)
         target_session = None
         for s in sessions:
             if s['session_id'].startswith(session_id):
@@ -347,49 +465,38 @@ def cmd_attach(args):
             console.print(f"[red]Session not found: {session_id}[/red]")
             return
 
+        attach_to_session(target_session)
+
     else:
-        # Interactive selection
-        table = create_saved_sessions_table(sessions[:20])
-        console.print(table)
-        console.print()
+        # Use TUI if available
+        if TUI_MODE:
+            app = SessionsApp()
+            app.run()
 
-        try:
-            choice = Prompt.ask(
-                "[bold]Select session number[/bold]",
-                default="1"
-            )
+            if app.selected_session:
+                attach_to_session(app.selected_session)
+        else:
+            # Fallback to prompt
+            table = create_saved_sessions_table(sessions[:20])
+            console.print(table)
+            console.print()
 
-            if not choice.isdigit():
-                console.print("[red]Invalid selection[/red]")
-                return
+            try:
+                choice = Prompt.ask("[bold]Select session number[/bold]", default="1")
 
-            idx = int(choice) - 1
-            if not (0 <= idx < len(sessions)):
-                console.print(f"[red]Invalid session number. Use 1-{min(20, len(sessions))}[/red]")
-                return
+                if not choice.isdigit():
+                    console.print("[red]Invalid selection[/red]")
+                    return
 
-            target_session = sessions[idx]
+                idx = int(choice) - 1
+                if not (0 <= idx < len(sessions)):
+                    console.print(f"[red]Invalid session number. Use 1-{min(20, len(sessions))}[/red]")
+                    return
 
-        except KeyboardInterrupt:
-            console.print("\n[dim]Cancelled.[/dim]")
-            return
+                attach_to_session(sessions[idx])
 
-    # Attach to session
-    session_id = target_session['session_id']
-    cwd = target_session['cwd']
-
-    console.print(f"\n[green]Resuming session:[/green] {session_id[:8]}...")
-    console.print(f"[dim]Directory: {cwd}[/dim]")
-    console.print()
-
-    # Change to session directory and run claude --resume
-    try:
-        os.chdir(cwd)
-    except (FileNotFoundError, PermissionError):
-        console.print(f"[yellow]Warning: Could not change to {cwd}, using current directory[/yellow]")
-
-    # Execute claude --resume
-    os.execlp("claude", "claude", "--resume", session_id)
+            except KeyboardInterrupt:
+                console.print("\n[dim]Cancelled.[/dim]")
 
 
 def main():
@@ -401,13 +508,13 @@ def main():
 
     subparsers = parser.add_subparsers(dest="command", help="Commands")
 
-    # monitor command (default)
-    monitor_parser = subparsers.add_parser("monitor", help="Monitor running sessions (default)")
+    # monitor command
+    monitor_parser = subparsers.add_parser("monitor", help="Monitor running sessions")
     monitor_parser.set_defaults(func=cmd_monitor)
 
-    # list command
-    list_parser = subparsers.add_parser("list", aliases=["ls"], help="List saved sessions")
-    list_parser.add_argument("-n", "--limit", type=int, default=20, help="Max sessions to show")
+    # list command (now default with TUI)
+    list_parser = subparsers.add_parser("list", aliases=["ls"], help="List saved sessions (interactive)")
+    list_parser.add_argument("-n", "--limit", type=int, default=50, help="Max sessions to show")
     list_parser.set_defaults(func=cmd_list)
 
     # attach command
@@ -417,10 +524,9 @@ def main():
 
     args = parser.parse_args()
 
-    # Default to monitor if no command
+    # Default to list (interactive TUI) if no command
     if args.command is None:
-        args.func = cmd_monitor
-        cmd_monitor(args)
+        cmd_list(args)
     else:
         args.func(args)
 
